@@ -2,15 +2,28 @@
  * @file waterfall.c
  * @brief Waterfall display for signal_relay display stream
  *
+ * DISPLAY CHAIN ONLY - No detection logic here.
+ * Detection (tick, marker, BCD) lives in phoenix-detector module.
+ *
  * Connects to signal_relay:4411 for 12kHz float32 I/Q display stream.
  * No decimation needed - data is already processed by signal_splitter.
+ *
+ * HOT PATH (per-frame with samples):
+ *   1. Receive I/Q samples from TCP or test pattern
+ *   2. Accumulate in circular buffer
+ *   3. Apply window function and compute FFT
+ *   4. Calculate magnitudes and map to screen pixels
+ *   5. Auto-gain tracking (attack/decay)
+ *   6. Scroll waterfall and draw new row
+ *   7. Render to screen
  *
  * Features:
  *   - Settings panel (Tab key)
  *   - Auto-connect with retry
+ *   - Service discovery (auto-finds signal_splitter)
  *   - Resizable window
  *   - Gain adjustment
- *   - Test pattern mode
+ *   - Test pattern mode (1000 Hz tone)
  */
 
 #include <stdio.h>
@@ -214,7 +227,8 @@ static void save_config(void) {
 }
 
 /*============================================================================
- * Window Function
+ * Window Function (Blackman-Harris)
+ * Called once at startup - reduces spectral leakage in FFT
  *============================================================================*/
 
 static void generate_blackman_harris(float *window, int size) {
@@ -368,7 +382,8 @@ static bool resize_buffers(void) {
 }
 
 /*============================================================================
- * Color Mapping
+ * Color Mapping (HOT PATH - called per pixel)
+ * Converts magnitude to RGB using blue→cyan→green→yellow→red gradient
  *============================================================================*/
 
 static void magnitude_to_rgb(float mag, float peak_db, float floor_db,
@@ -827,6 +842,9 @@ int main(int argc, char *argv[]) {
         /* Get data */
         bool got_samples = false;
 
+        /*====================================================================
+         * HOT PATH - Sample Acquisition (Test Pattern)
+         *====================================================================*/
         if (g_test_pattern) {
             for (int i = 0; i < DISPLAY_OVERLAP; i++) {
                 double phase = 2.0 * 3.14159265 * 1000.0 * g_test_sample_count / g_sample_rate;
@@ -837,6 +855,9 @@ int main(int argc, char *argv[]) {
                 g_new_samples++;
             }
             got_samples = (g_new_samples >= DISPLAY_OVERLAP);
+        /*====================================================================
+         * HOT PATH - Sample Acquisition (TCP from signal_relay)
+         *====================================================================*/
         } else if (g_connected) {
             relay_data_frame_t frame;
             recv_result_t result = tcp_recv_exact(g_socket, &frame, sizeof(frame));
@@ -853,6 +874,7 @@ int main(int argc, char *argv[]) {
                     sample_buffer_size = data_bytes;
                 }
 
+                /* HOT PATH - I/Q Buffer Accumulation */
                 if (tcp_recv_exact(g_socket, sample_buffer, data_bytes) == RECV_OK) {
                     for (uint32_t s = 0; s < frame.num_samples; s++) {
                         g_iq_buffer[g_iq_buffer_idx].i = sample_buffer[s * 2];
@@ -875,11 +897,14 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        /* Process FFT if we have new samples */
+        /*====================================================================
+         * HOT PATH - FFT Processing
+         * Apply Blackman-Harris window and compute FFT
+         *====================================================================*/
         if (got_samples) {
             g_new_samples = 0;
 
-            /* FFT */
+            /* Apply window function to I/Q samples */
             for (int i = 0; i < DISPLAY_FFT_SIZE; i++) {
                 int idx = (g_iq_buffer_idx + i) % DISPLAY_FFT_SIZE;
                 g_fft_in[i].r = g_iq_buffer[idx].i * g_window_func[i];
@@ -887,7 +912,10 @@ int main(int argc, char *argv[]) {
             }
             kiss_fft(g_fft_cfg, g_fft_in, g_fft_out);
 
-            /* Calculate magnitudes */
+            /*================================================================
+             * HOT PATH - Magnitude Calculation
+             * Map FFT bins to screen pixels with frequency zoom
+             *================================================================*/
             float bin_hz = DISPLAY_HZ_PER_BIN;
             for (int i = 0; i < g_window_width; i++) {
                 float freq = ((float)i / g_window_width - 0.5f) * 2.0f * ZOOM_MAX_HZ;
@@ -901,7 +929,10 @@ int main(int argc, char *argv[]) {
                 g_magnitudes[i] = sqrtf(re*re + im*im) / DISPLAY_FFT_SIZE;
             }
 
-            /* Auto-gain */
+            /*================================================================
+             * HOT PATH - Auto-Gain (Attack/Decay AGC)
+             * Track peak and floor dB levels for color mapping
+             *================================================================*/
             float frame_max = -200.0f, frame_min = 200.0f;
             for (int i = 0; i < g_window_width; i++) {
                 float db = 20.0f * log10f(g_magnitudes[i] + 1e-10f);
@@ -911,11 +942,13 @@ int main(int argc, char *argv[]) {
             g_peak_db += ((frame_max > g_peak_db) ? AGC_ATTACK : AGC_DECAY) * (frame_max - g_peak_db);
             g_floor_db += ((frame_min < g_floor_db) ? AGC_ATTACK : AGC_DECAY) * (frame_min - g_floor_db);
 
-            /* Scroll waterfall */
+            /*================================================================
+             * HOT PATH - Waterfall Scroll and Row Draw
+             * Scroll existing pixels down, draw new row at top
+             *================================================================*/
             memmove(g_pixels + g_window_width * 3, g_pixels,
                     g_window_width * (g_window_height - 1) * 3);
 
-            /* Draw new row */
             for (int x = 0; x < g_window_width; x++) {
                 uint8_t r, g, b;
                 magnitude_to_rgb(g_magnitudes[x], g_peak_db, g_floor_db, &r, &g, &b);
@@ -924,11 +957,13 @@ int main(int argc, char *argv[]) {
                 g_pixels[x*3+2] = b;
             }
 
-            /* Draw status indicator */
+            /* Status indicator overlay */
             draw_status_indicator();
         }
 
-        /* Always render */
+        /*====================================================================
+         * HOT PATH - Render to Screen
+         *====================================================================*/
         SDL_UpdateTexture(g_texture, NULL, g_pixels, g_window_width * 3);
         SDL_RenderClear(g_renderer);
         SDL_RenderCopy(g_renderer, g_texture, NULL, NULL);
