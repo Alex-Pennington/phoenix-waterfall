@@ -6,7 +6,7 @@
  * Detection (tick, marker, BCD) lives in phoenix-detector module.
  *
  * Connects to signal_relay:4411 for 12kHz float32 I/Q display stream.
- * No decimation needed - data is already processed by signal_splitter.
+ * No decimation needed - data is already processed by signal_relay.
  *
  * HOT PATH (per-frame with samples):
  *   1. Receive I/Q samples from TCP or test pattern
@@ -20,7 +20,7 @@
  * Features:
  *   - Settings panel (Tab key)
  *   - Auto-connect with retry
- *   - Service discovery (auto-finds signal_splitter)
+ *   - Service discovery (auto-finds signal_relay)
  *   - Resizable window
  *   - Gain adjustment
  *   - Test pattern mode (1000 Hz tone)
@@ -137,6 +137,11 @@ static uint32_t g_sample_rate = DISPLAY_SAMPLE_RATE;
 static bool g_discovery_enabled = true;
 static char g_node_id[64] = "WATERFALL-1";
 static bool g_auto_connect = true;  /* Auto-connect to discovered services */
+
+/* Thread-safe discovery state (set by callback, read by main loop) */
+static volatile bool g_service_discovered = false;
+static char g_discovered_ip[64] = {0};
+static int g_discovered_port = 0;
 
 /* Mode */
 static bool g_test_pattern = false;
@@ -576,44 +581,11 @@ static void on_service_discovered(const char *id, const char *service,
     
     printf("[DISCOVERY] Found %s '%s' at %s:%d\n", service, id, ip, data_port);
     
-    /* Auto-connect to signal_splitter or sdr_server if not connected */
-    if (!g_connected && !g_test_pattern && g_auto_connect) {
-        /* Prefer signal_splitter (already decimated) over sdr_server */
-        if (strcmp(service, PN_SVC_SIGNAL_SPLITTER) == 0) {
-            printf("[DISCOVERY] Auto-connecting to signal_splitter at %s:%d\n", ip, data_port);
-            strncpy(g_relay_host, ip, sizeof(g_relay_host) - 1);
-            g_relay_port = data_port;
-            
-#ifdef HAS_GUI
-            /* Update UI widgets with discovered service */
-            widget_input_set_text(&g_input_host, ip);
-            char port_str[16];
-            snprintf(port_str, sizeof(port_str), "%d", data_port);
-            widget_input_set_text(&g_input_port, port_str);
-#endif
-            
-            connect_to_relay();
-        } else if (strcmp(service, PN_SVC_SDR_SERVER) == 0) {
-            /* Only connect to sdr_server if we haven't found a splitter */
-            printf("[DISCOVERY] Found sdr_server at %s:%d (prefer signal_splitter)\n", ip, data_port);
-            /* Could auto-connect here if desired, but waterfall expects 12kHz stream */
-        }
-    } else if (!g_connected && !g_test_pattern && !g_auto_connect) {
-        /* If auto-connect is disabled, still update UI fields for convenience */
-        if (strcmp(service, PN_SVC_SIGNAL_SPLITTER) == 0) {
-            strncpy(g_relay_host, ip, sizeof(g_relay_host) - 1);
-            g_relay_port = data_port;
-            
-#ifdef HAS_GUI
-            /* Update UI widgets with discovered service */
-            widget_input_set_text(&g_input_host, ip);
-            char port_str[16];
-            snprintf(port_str, sizeof(port_str), "%d", data_port);
-            widget_input_set_text(&g_input_port, port_str);
-#endif
-            
-            printf("[DISCOVERY] Updated connection fields to signal_splitter at %s:%d (auto-connect disabled)\n", ip, data_port);
-        }
+    /* Thread-safe: only set flags for main loop to process */
+    if (strcmp(service, PN_SVC_SIGNAL_RELAY) == 0) {
+        strncpy(g_discovered_ip, ip, sizeof(g_discovered_ip) - 1);
+        g_discovered_port = data_port;
+        g_service_discovered = true;
     }
 }
 
@@ -683,6 +655,16 @@ int main(int argc, char *argv[]) {
             /* Announce ourselves */
             pn_announce(g_node_id, PN_SVC_WATERFALL, 0, 0, "display");
             printf("Discovery: ENABLED (announcing as %s)\n", g_node_id);
+            
+            /* Query existing services in registry */
+            const pn_service_t *relay = pn_find_service(PN_SVC_SIGNAL_RELAY);
+            if (relay) {
+                printf("[DISCOVERY] Found existing signal_relay at %s:%d\n", 
+                       relay->ip, relay->data_port);
+                strncpy(g_discovered_ip, relay->ip, sizeof(g_discovered_ip) - 1);
+                g_discovered_port = relay->data_port;
+                g_service_discovered = true;
+            }
         } else {
             fprintf(stderr, "Warning: Discovery init failed\n");
             g_discovery_enabled = false;
@@ -746,8 +728,8 @@ int main(int argc, char *argv[]) {
 
     printf("\nPress Tab for settings, Q to quit\n\n");
 
-    /* Show settings panel on startup (don't auto-connect) */
-    g_show_settings = true;
+    /* Wait for service discovery and auto-connect */
+    g_show_settings = false;
 
     /* Main loop */
     bool running = true;
@@ -756,6 +738,32 @@ int main(int argc, char *argv[]) {
     mouse_state_t mouse = {0};
 
     while (running) {
+        /* Process discovered services (thread-safe from callback) */
+        if (g_service_discovered && !g_connected && !g_test_pattern) {
+            g_service_discovered = false;  /* Clear flag */
+            
+            /* Update connection settings */
+            strncpy(g_relay_host, g_discovered_ip, sizeof(g_relay_host) - 1);
+            g_relay_port = g_discovered_port;
+            
+#ifdef HAS_GUI
+            /* Update UI widgets safely (we're in main thread) */
+            widget_input_set_text(&g_input_host, g_discovered_ip);
+            char port_str[16];
+            snprintf(port_str, sizeof(port_str), "%d", g_discovered_port);
+            widget_input_set_text(&g_input_port, port_str);
+#endif
+            
+            /* Auto-connect if enabled */
+            if (g_auto_connect) {
+                printf("[DISCOVERY] Auto-connecting to %s:%d\n", g_relay_host, g_relay_port);
+                connect_to_relay();
+            } else {
+                printf("[DISCOVERY] Updated connection fields to %s:%d (auto-connect disabled)\n",
+                       g_relay_host, g_relay_port);
+            }
+        }
+        
         /* Reset per-frame mouse state */
         mouse.left_clicked = false;
         mouse.left_released = false;
@@ -1013,9 +1021,8 @@ int main(int argc, char *argv[]) {
     free(sample_buffer);
     disconnect_from_relay();
     
-    /* Shutdown discovery */
+    /* Shutdown discovery (automatically sends BYE) */
     if (g_discovery_enabled) {
-        pn_announce_stop();  /* Send BYE message */
         pn_discovery_shutdown();
     }
     
