@@ -583,11 +583,36 @@ static void on_service_discovered(const char *id, const char *service,
             printf("[DISCOVERY] Auto-connecting to signal_splitter at %s:%d\n", ip, data_port);
             strncpy(g_relay_host, ip, sizeof(g_relay_host) - 1);
             g_relay_port = data_port;
+            
+#ifdef HAS_GUI
+            /* Update UI widgets with discovered service */
+            widget_input_set_text(&g_input_host, ip);
+            char port_str[16];
+            snprintf(port_str, sizeof(port_str), "%d", data_port);
+            widget_input_set_text(&g_input_port, port_str);
+#endif
+            
             connect_to_relay();
         } else if (strcmp(service, PN_SVC_SDR_SERVER) == 0) {
             /* Only connect to sdr_server if we haven't found a splitter */
             printf("[DISCOVERY] Found sdr_server at %s:%d (prefer signal_splitter)\n", ip, data_port);
             /* Could auto-connect here if desired, but waterfall expects 12kHz stream */
+        }
+    } else if (!g_connected && !g_test_pattern && !g_auto_connect) {
+        /* If auto-connect is disabled, still update UI fields for convenience */
+        if (strcmp(service, PN_SVC_SIGNAL_SPLITTER) == 0) {
+            strncpy(g_relay_host, ip, sizeof(g_relay_host) - 1);
+            g_relay_port = data_port;
+            
+#ifdef HAS_GUI
+            /* Update UI widgets with discovered service */
+            widget_input_set_text(&g_input_host, ip);
+            char port_str[16];
+            snprintf(port_str, sizeof(port_str), "%d", data_port);
+            widget_input_set_text(&g_input_port, port_str);
+#endif
+            
+            printf("[DISCOVERY] Updated connection fields to signal_splitter at %s:%d (auto-connect disabled)\n", ip, data_port);
         }
     }
 }
