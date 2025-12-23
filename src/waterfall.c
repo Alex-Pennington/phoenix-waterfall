@@ -579,12 +579,12 @@ static void on_service_discovered(const char *id, const char *service,
     /* Auto-connect to signal_splitter or sdr_server if not connected */
     if (!g_connected && !g_test_pattern && g_auto_connect) {
         /* Prefer signal_splitter (already decimated) over sdr_server */
-        if (strcmp(service, "signal_splitter") == 0) {
+        if (strcmp(service, PN_SVC_SIGNAL_SPLITTER) == 0) {
             printf("[DISCOVERY] Auto-connecting to signal_splitter at %s:%d\n", ip, data_port);
             strncpy(g_relay_host, ip, sizeof(g_relay_host) - 1);
             g_relay_port = data_port;
             connect_to_relay();
-        } else if (strcmp(service, "sdr_server") == 0) {
+        } else if (strcmp(service, PN_SVC_SDR_SERVER) == 0) {
             /* Only connect to sdr_server if we haven't found a splitter */
             printf("[DISCOVERY] Found sdr_server at %s:%d (prefer signal_splitter)\n", ip, data_port);
             /* Could auto-connect here if desired, but waterfall expects 12kHz stream */
@@ -656,7 +656,7 @@ int main(int argc, char *argv[]) {
             /* Listen for services on LAN */
             pn_listen(on_service_discovered, NULL);
             /* Announce ourselves */
-            pn_announce(g_node_id, "waterfall", 0, 0, "display");
+            pn_announce(g_node_id, PN_SVC_WATERFALL, 0, 0, "display");
             printf("Discovery: ENABLED (announcing as %s)\n", g_node_id);
         } else {
             fprintf(stderr, "Warning: Discovery init failed\n");
@@ -990,6 +990,7 @@ int main(int argc, char *argv[]) {
     
     /* Shutdown discovery */
     if (g_discovery_enabled) {
+        pn_announce_stop();  /* Send BYE message */
         pn_discovery_shutdown();
     }
     
