@@ -5,8 +5,8 @@
  * DISPLAY CHAIN ONLY - No detection logic here.
  * Detection (tick, marker, BCD) lives in phoenix-detector module.
  *
- * Connects to signal_relay:4411 for 12kHz float32 I/Q display stream.
- * No decimation needed - data is already processed by signal_relay.
+ * Connects to sdr_server for raw I/Q stream.
+ * Uses phoenix-dsp for filtering/demodulation, phoenix-kiss-fft for FFT.
  *
  * HOT PATH (per-frame with samples):
  *   1. Receive I/Q samples from TCP or test pattern
@@ -20,7 +20,7 @@
  * Features:
  *   - Settings panel (Tab key)
  *   - Auto-connect with retry
- *   - Service discovery (auto-finds signal_relay)
+ *   - Service discovery (auto-finds sdr_server)
  *   - Resizable window
  *   - Gain adjustment
  *   - Test pattern mode (1000 Hz tone)
@@ -582,7 +582,7 @@ static void on_service_discovered(const char *id, const char *service,
     printf("[DISCOVERY] Found %s '%s' at %s:%d\n", service, id, ip, data_port);
     
     /* Thread-safe: only set flags for main loop to process */
-    if (strcmp(service, PN_SVC_SIGNAL_RELAY) == 0) {
+    if (strcmp(service, PN_SVC_SDR_SERVER) == 0) {
         strncpy(g_discovered_ip, ip, sizeof(g_discovered_ip) - 1);
         g_discovered_port = data_port;
         g_service_discovered = true;
@@ -657,12 +657,12 @@ int main(int argc, char *argv[]) {
             printf("Discovery: ENABLED (announcing as %s)\n", g_node_id);
             
             /* Query existing services in registry */
-            const pn_service_t *relay = pn_find_service(PN_SVC_SIGNAL_RELAY);
-            if (relay) {
-                printf("[DISCOVERY] Found existing signal_relay at %s:%d\n", 
-                       relay->ip, relay->data_port);
-                strncpy(g_discovered_ip, relay->ip, sizeof(g_discovered_ip) - 1);
-                g_discovered_port = relay->data_port;
+            const pn_service_t *sdr = pn_find_service(PN_SVC_SDR_SERVER);
+            if (sdr) {
+                printf("[DISCOVERY] Found existing sdr_server at %s:%d\n", 
+                       sdr->ip, sdr->data_port);
+                strncpy(g_discovered_ip, sdr->ip, sizeof(g_discovered_ip) - 1);
+                g_discovered_port = sdr->data_port;
                 g_service_discovered = true;
             }
         } else {
