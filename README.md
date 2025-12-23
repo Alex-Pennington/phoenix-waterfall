@@ -1,6 +1,6 @@
 # phoenix-waterfall
 
-**Version:** v0.1.0  
+**Version:** v0.2.0  
 **Part of:** Phoenix Nest MARS Communications Suite  
 **Developer:** Alex Pennington (KY4OLB)
 
@@ -8,20 +8,20 @@
 
 ## Overview
 
-Real-time SDR waterfall display with integrated WWV time signal detection. Receives I/Q samples from phoenix-sdr-core and provides visual spectrum analysis with synchronized audio output.
+Real-time SDR waterfall display for the Phoenix SDR suite. Receives 12kHz float32 I/Q samples from signal_relay and provides visual spectrum analysis for operator signal verification.
+
+This is the **display chain only** — detection logic (WWV tick detection, BCD decoding, etc.) lives in a separate module.
 
 ---
 
 ## Features
 
 - **SDL2 Waterfall Display** — Real-time spectrum visualization
-- **WWV Tick Detection** — 1000 Hz tick pulse detection at 1-second intervals
-- **Minute Marker Detection** — 800ms marker detection for minute boundaries
-- **BCD Time Decoder** — 100 Hz subcarrier time code extraction
-- **Tone Tracking** — 500/600 Hz reference tone identification
-- **Sync State Machine** — Multi-stage synchronization with confidence tracking
-- **UDP Telemetry** — Real-time broadcast of detection events
-- **Audio Output** — Demodulated audio with volume control
+- **Auto-Gain** — Adaptive color mapping
+- **Service Discovery** — Auto-connects to signal_splitter via UDP discovery
+- **Settings Panel** — Runtime configuration (Tab key)
+- **Test Pattern** — 1000 Hz tone for testing without network
+- **Resizable Window** — Configuration persists to INI file
 
 ---
 
@@ -32,34 +32,18 @@ Real-time SDR waterfall display with integrated WWV time signal detection. Recei
 │                        phoenix-waterfall                             │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                     │
-│   TCP I/Q Input                                                     │
+│   signal_relay (TCP:4411)                                           │
 │        │                                                            │
+│        │  12kHz float32 I/Q                                         │
 │        ▼                                                            │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐             │
-│  │   Decimate  │───►│  FFT/DSP    │───►│  Waterfall  │             │
-│  │   2M→50k    │    │  Processing │    │   Display   │             │
+│  │   I/Q       │───►│     FFT     │───►│  Waterfall  │             │
+│  │   Buffer    │    │  Processing │    │   Display   │             │
 │  └─────────────┘    └─────────────┘    └─────────────┘             │
+│                                                                     │
+│   phoenix-discovery                                                 │
 │        │                                                            │
-│        ├────────────────────────────────────────────────┐          │
-│        │                                                │          │
-│        ▼                                                ▼          │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐            │
-│  │   Tick      │    │   Marker    │    │    BCD      │            │
-│  │  Detector   │    │  Detector   │    │  Decoder    │            │
-│  └──────┬──────┘    └──────┬──────┘    └──────┬──────┘            │
-│         │                  │                  │                    │
-│         └──────────────────┼──────────────────┘                    │
-│                            ▼                                        │
-│                    ┌─────────────┐                                 │
-│                    │    Sync     │                                 │
-│                    │  Detector   │                                 │
-│                    └──────┬──────┘                                 │
-│                           │                                         │
-│                           ▼                                         │
-│                    ┌─────────────┐                                 │
-│                    │  Telemetry  │──► UDP Broadcast                │
-│                    │   Output    │                                 │
-│                    └─────────────┘                                 │
+│        └── Auto-connect to signal_splitter                          │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -70,50 +54,52 @@ Real-time SDR waterfall display with integrated WWV time signal detection. Recei
 
 ### Required
 
-- **SDL2** — Graphics and audio
+- **SDL2** — Graphics and window management
+- **SDL2_ttf** — Text rendering
 - **kiss_fft** — FFT processing (included)
-- **phoenix-sdr-core** — I/Q streaming source
+- **phoenix-discovery** — LAN service discovery (submodule)
 
 ### Windows Build
 
-- MinGW-w64 or MSVC
-- SDL2 development libraries
+- MSYS2 UCRT64 or MinGW-w64
+- CMake 3.16+
 
 ---
 
 ## Building
 
-### Quick Build
+### Quick Build (MSYS2)
 
-```powershell
-.\build.ps1
+```bash
+cd build/msys2-ucrt64
+cmake --build .
 ```
 
-### Manual Build
+### Full Rebuild
 
-```powershell
-gcc -O2 -I include -I "C:\SDL2\include" ^
-    src\waterfall.c src\waterfall_dsp.c src\waterfall_flash.c ^
-    src\waterfall_telemetry.c src\waterfall_audio.c ^
-    src\tick_detector.c src\marker_detector.c src\sync_detector.c ^
-    src\tone_tracker.c src\bcd_*.c src\channel_filters.c ^
-    src\kiss_fft.c ^
-    -L "C:\SDL2\lib" -lSDL2main -lSDL2 -lws2_32 -lwinmm ^
-    -o waterfall.exe
+```bash
+cd build/msys2-ucrt64
+cmake --build . --clean-first
 ```
 
 ---
 
 ## Usage
 
-### Connect to SDR Server
+### Auto-Discovery Mode
 
 ```powershell
-# Start SDR server (from phoenix-sdr-core)
-sdr_server.exe
+# Start signal_splitter (broadcasts discovery)
+signal_splitter.exe
 
-# Start waterfall (connects to localhost:4536)
+# Start waterfall (auto-connects)
 waterfall.exe
+```
+
+### Manual Connection
+
+```powershell
+waterfall.exe --host 192.168.1.100 --port 4411
 ```
 
 ### Command Line Options
@@ -122,86 +108,80 @@ waterfall.exe
 waterfall.exe [options]
 
 Options:
-  --tcp HOST:PORT    Connect to I/Q server (default: localhost:4536)
-  --stdin            Read PCM audio from stdin instead of TCP
-  --test             Generate synthetic 1000 Hz test pattern
-  --log-csv          Enable CSV file logging (in addition to UDP)
-  --help             Show this help
+  --host HOST       Relay server hostname (default: localhost)
+  --port PORT       Display stream port (default: 4411)
+  --test-pattern    Generate test tone (no network)
+  --node-id ID      Node ID for discovery (default: WATERFALL-1)
+  --no-discovery    Disable service discovery
+  --no-auto         Disable auto-connect to discovered services
+  --help            Show this help
 ```
 
 ### Keyboard Controls
 
 | Key | Action |
 |-----|--------|
+| `Tab` | Toggle settings panel |
+| `+` / `=` | Gain up |
+| `-` | Gain down |
+| `R` | Reconnect |
+| `T` | Toggle test pattern |
 | `Q` / `ESC` | Quit |
-| `M` | Toggle audio mute |
-| `+` / `=` | Volume up |
-| `-` | Volume down |
-| `R` | Reload tuned parameters |
-| `Space` | Toggle pause |
 
 ---
 
-## Telemetry Protocol
+## Configuration
 
-UDP broadcast on port 3005 (default). CSV format with channel prefix.
+Settings saved to `waterfall.ini`:
 
-### Channels
-
-| Channel | Prefix | Description |
-|---------|--------|-------------|
-| CHANNEL | `CHAN` | Signal quality metrics |
-| TICKS | `TICK` | Tick pulse events |
-| MARKERS | `MARK` | Minute marker events |
-| SYNC | `SYNC` | Sync state changes |
-| BCDS | `BCDS` | BCD symbols and time |
-| CONSOLE | `CONS` | Status messages |
-
-### Example Messages
-
-```
-TICK,1000Hz,12.5ms,0.85,1734567890123
-MARK,1000Hz,800ms,0.92,1734567890000
-SYNC,LOCKED,3,60.5,2024-12-18T15:30:00Z
-BCDS,SYM,1,1734567890500,485
+```ini
+; Phoenix Waterfall Configuration
+host=localhost
+port=4411
+width=1024
+height=600
+gain=0.0
 ```
 
 ---
 
-## Components
+## Signal Protocol
 
-### Display
+### Stream Header (FT32)
+
+```c
+typedef struct {
+    uint32_t magic;        // 0x46543332 "FT32"
+    uint32_t sample_rate;  // 12000
+    uint32_t reserved1;
+    uint32_t reserved2;
+} relay_stream_header_t;
+```
+
+### Data Frames (DATA)
+
+```c
+typedef struct {
+    uint32_t magic;        // 0x44415441 "DATA"
+    uint32_t sequence;
+    uint32_t num_samples;
+    uint32_t reserved;
+    // float32 I/Q pairs follow
+} relay_data_frame_t;
+```
+
+---
+
+## Source Files
 
 | File | Description |
 |------|-------------|
-| `waterfall.c` | Main application, SDL rendering |
-| `waterfall_dsp.c/h` | DSP processing (lowpass, DC removal) |
-| `waterfall_flash.c/h` | Visual flash/marker system |
-| `waterfall_audio.c/h` | Audio output (waveOut) |
-| `waterfall_telemetry.c/h` | UDP telemetry broadcast |
-
-### Detectors
-
-| File | Description |
-|------|-------------|
-| `tick_detector.c/h` | 1000 Hz tick pulse detection |
-| `marker_detector.c/h` | 800ms minute marker detection |
-| `sync_detector.c/h` | Synchronization state machine |
-| `tone_tracker.c/h` | 500/600 Hz tone tracking |
-| `tick_correlator.c/h` | Tick correlation analysis |
-| `marker_correlator.c/h` | Marker correlation analysis |
-| `slow_marker_detector.c/h` | Slow marker detection backup |
-| `channel_filters.c/h` | Sync/data channel separation |
-
-### BCD Decoding
-
-| File | Description |
-|------|-------------|
-| `bcd_envelope.c/h` | 100 Hz subcarrier envelope |
-| `bcd_decoder.c/h` | BCD symbol classification |
-| `bcd_time_detector.c/h` | Time-domain BCD detection |
-| `bcd_freq_detector.c/h` | Frequency-domain BCD detection |
-| `bcd_correlator.c/h` | Window-based BCD integration |
+| `src/waterfall.c` | Main application, SDL rendering |
+| `src/waterfall_dsp.c` | DSP utilities (lowpass, DC removal) |
+| `src/waterfall_audio.c` | Audio output |
+| `src/ui_core.c` | GUI framework |
+| `src/ui_widgets.c` | Widget implementations |
+| `src/kiss_fft.c` | FFT processing |
 
 ---
 
@@ -211,8 +191,7 @@ BCDS,SYM,1,1734567890500,485
 |------------|-------------|
 | [mars-suite](https://github.com/Alex-Pennington/mars-suite) | Phoenix Nest MARS Suite index |
 | [phoenix-sdr-core](https://github.com/Alex-Pennington/phoenix-sdr-core) | SDR hardware interface |
-| [phoenix-reference-library](https://github.com/Alex-Pennington/phoenix-reference-library) | Technical documentation |
-| [phoenix-wwv](https://github.com/Alex-Pennington/phoenix-wwv) | WWV detection library |
+| [phoenix-discovery](https://github.com/Alex-Pennington/phoenix-discovery) | LAN service discovery |
 
 ---
 

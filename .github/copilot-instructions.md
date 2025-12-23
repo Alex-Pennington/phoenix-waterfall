@@ -11,156 +11,119 @@
 
 ## Architecture Overview
 
-**Phoenix Waterfall** is the SDL2-based visualization and detection application for WWV/WWVH time signals.
+**Phoenix Waterfall** is the SDL2-based **display-only** visualization for the Phoenix SDR suite. It provides visual feedback to the operator showing RF signal quality. Detection logic (tick detection, BCD decoding, etc.) lives in a separate module.
 
 ### Signal Flow
 ```
-TCP I/Q Input (from phoenix-sdr-core)
+signal_relay (TCP:4411)
         │
+        │  12kHz float32 I/Q
         ▼
    waterfall.c
         │
-        ├─────────────────────────────────────────────┐
-        │                                             │
-        ▼                                             ▼
-DETECTOR PATH (50 kHz)                     DISPLAY PATH (12 kHz)
-lowpass → decimate                         lowpass → decimate
-        │                                             │
-   ┌────┼────┬────────────┐                ┌──────────┤
-   ▼    ▼    ▼            ▼                ▼          ▼
- tick marker bcd_*     sync          tone_tracker  FFT waterfall
-   │    │    │          │                  │
-   ▼    ▼    ▼          ▼                  ▼
-callbacks → CSV logging + UDP telemetry
+        ├──────────────────┐
+        │                  │
+        ▼                  ▼
+   FFT Processing    Audio Output
+        │            (waterfall_audio)
+        ▼
+   Waterfall Display
+   (color-mapped spectrum)
 ```
 
-### Key Directories
-| Path | Purpose |
+### Key Files
+| File | Purpose |
 |------|---------|
-| `src/` | Main application and detector modules |
-| `include/` | Public headers |
-| `docs/` | Documentation |
+| `src/waterfall.c` | Main application, SDL rendering, TCP client |
+| `src/waterfall_dsp.c` | DSP utilities (lowpass, DC removal) |
+| `src/waterfall_audio.c` | Audio output for operator monitoring |
+| `src/ui_core.c` | GUI framework |
+| `src/ui_widgets.c` | Input, slider, button widgets |
+| `src/kiss_fft.c` | FFT processing |
 
 ---
 
 ## Build
 
 ```powershell
-.\build.ps1                    # Debug build
-.\build.ps1 -Release           # Optimized build
-.\build.ps1 -Clean             # Clean artifacts
+cd build/msys2-ucrt64
+cmake --build .
 ```
 
-**Dependencies:** SDL2, kiss_fft (included), Winsock2
+**Dependencies:** SDL2, SDL2_ttf, kiss_fft (included), phoenix-discovery (submodule)
 
 ---
 
-## Critical Patterns
+## Key Patterns
 
-### P1 - Signal Path Divergence
-All signal processors receive samples from the SAME divergence point in `waterfall.c`:
+### P1 - TCP Protocol (signal_relay)
 ```c
-// Raw samples normalized to [-1, 1]
-float i_raw = (float)samples[s * 2] / 32768.0f;
-float q_raw = (float)samples[s * 2 + 1] / 32768.0f;
+// Stream header (sent once on connect)
+typedef struct {
+    uint32_t magic;        // 0x46543332 "FT32"
+    uint32_t sample_rate;  // 12000
+    uint32_t reserved1;
+    uint32_t reserved2;
+} relay_stream_header_t;
 
-// DETECTOR PATH (50 kHz) - for pulse detection
-float det_i = lowpass_process(&g_detector_lowpass_i, i_raw);
-float det_q = lowpass_process(&g_detector_lowpass_q, i_raw);
-// → tick_detector, marker_detector, bcd_*_detector
-
-// DISPLAY PATH (12 kHz) - for visualization
-float disp_i = lowpass_process(&g_display_lowpass_i, i_raw);
-float disp_q = lowpass_process(&g_display_lowpass_q, q_raw);
-// → tone_tracker, bcd_envelope, FFT waterfall
+// Data frames (continuous)
+typedef struct {
+    uint32_t magic;        // 0x44415441 "DATA"
+    uint32_t sequence;
+    uint32_t num_samples;
+    uint32_t reserved;
+    // followed by num_samples * 2 * float32 (I/Q pairs)
+} relay_data_frame_t;
 ```
-**Never cross paths.** Detectors use `det_i/det_q`. Display uses `disp_i/disp_q`.
 
-### P2 - Detector Module Pattern
-All detectors follow the same structure:
+### P2 - Service Discovery
+Uses phoenix-discovery submodule for LAN service discovery:
 ```c
-// Header pattern
-typedef struct xxx_detector xxx_detector_t;           // Opaque type
-typedef void (*xxx_callback_fn)(const xxx_event_t *event, void *user_data);
-
-xxx_detector_t *xxx_detector_create(const char *csv_path);  // NULL disables CSV
-void xxx_detector_destroy(xxx_detector_t *det);
-void xxx_detector_set_callback(xxx_detector_t *det, xxx_callback_fn cb, void *user_data);
-bool xxx_detector_process_sample(xxx_detector_t *det, float i, float q);
+pn_announce(node_id, "waterfall", 0, 0, "display");
+pn_listen(on_service_discovered, NULL);
 ```
-Each detector owns: own FFT, own sample buffer, own state machine.
+Auto-connects to `signal_splitter` when discovered.
 
-### P3 - CSV/UDP Telemetry Pattern
-Detectors support dual output:
-```c
-// CSV header pattern (written in _create)
-fprintf(csv_file, "# Phoenix SDR %s Log v%s\n", detector_name, VERSION);
-fprintf(csv_file, "time,timestamp_ms,field1,field2,...\n");
-
-// UDP telemetry pattern (from callbacks)
-telem_sendf(TELEM_TICKS, "%s,%.1f,T%d,%d,...", time_str, timestamp_ms, tick_num, ...);
-```
-Channel prefixes: `TICK`, `MARK`, `SYNC`, `BCDS`, `CARR`, `T500`, `T600`
-
-### P4 - Display/Audio Isolation
-Display and audio paths NEVER share variables or filters:
-- Display: `g_display_dsp`
-- Audio: `g_audio_dsp` (in `waterfall_audio.c`)
-
-### P5 - DSP Filter Pattern
-Filters use inline structs from `waterfall_dsp.h`:
+### P3 - DSP Filter Pattern
 ```c
 wf_lowpass_t lp;
 wf_lowpass_init(&lp, cutoff_hz, sample_rate);
 float out = wf_lowpass_process(&lp, input);
 ```
 
-### P7 - Callback Event Structs
-Each detector defines an event struct passed to callbacks:
+### P4 - Display Parameters
 ```c
-typedef struct {
-    float timestamp_ms;     // When event occurred
-    float duration_ms;      // Pulse/event duration
-    float peak_energy;      // Signal strength
-    // ... detector-specific fields
-} xxx_event_t;
+#define DISPLAY_SAMPLE_RATE     12000
+#define DISPLAY_FFT_SIZE        2048
+#define DISPLAY_OVERLAP         1024
+#define DISPLAY_HZ_PER_BIN      5.86f  // 12000/2048
+#define ZOOM_MAX_HZ             5000.0f
 ```
-
-### P8 - UI Flash Feedback Pattern
-Detectors provide flash state for visual feedback via `waterfall_flash.h`:
-```c
-int xxx_detector_get_flash_frames(xxx_detector_t *det);
-void xxx_detector_decrement_flash(xxx_detector_t *det);
-```
-Flash sources register with `flash_register()` for waterfall band markers.
-
-### P9 - WWV Broadcast Clock
-WWV/WWVH broadcast schedule knowledge:
-- Tick at each second EXCEPT seconds 29 and 59
-- 800ms marker at second 0 of each minute
-- Station-aware: WWV=1000Hz, WWVH=1200Hz
 
 ---
 
-## Thawed Files
+## Runtime Controls
 
-All files are open for modification. The repository split provides a clean slate.
-
-Previously frozen files that are now thawed:
-- `src/waterfall.c`
-- `src/waterfall_dsp.c`
-- `src/marker_detector.c`
-- `src/sync_detector.c`
+| Key | Action |
+|-----|--------|
+| Tab | Toggle settings panel |
+| +/- | Adjust gain |
+| R | Reconnect |
+| T | Toggle test pattern |
+| Q/Esc | Quit |
 
 ---
 
-## Domain Knowledge
+## Configuration
 
-- **WWV/WWVH:** NIST time stations at 5/10/15/20 MHz
-- **Tick:** 5ms pulse of 1000 Hz tone every second (AM modulated)
-- **Minute marker:** 800ms pulse at second 0 of each minute
-- **BCD time code:** 100 Hz subcarrier with binary time data
-- **DC hole:** Zero-IF receivers have DC offset; tune 450 Hz off-center
+Settings persist to `waterfall.ini`:
+```ini
+host=localhost
+port=4411
+width=1024
+height=600
+gain=0.0
+```
 
 ---
 
@@ -168,6 +131,8 @@ Previously frozen files that are now thawed:
 
 | Library | Purpose |
 |---------|---------|
-| SDL2 | Graphics and audio |
+| SDL2 | Graphics and window |
+| SDL2_ttf | Text rendering |
 | kiss_fft | FFT processing (included) |
-| Winsock2 | TCP/UDP networking |
+| phoenix-discovery | LAN service discovery (submodule) |
+| Winsock2 | TCP networking (Windows) |
