@@ -56,8 +56,12 @@ This is the **display chain only** — detection logic (WWV tick detection, BCD 
 
 - **SDL2** — Graphics and window management
 - **SDL2_ttf** — Text rendering
-- **kiss_fft** — FFT processing (included)
-- **phoenix-discovery** — LAN service discovery (submodule)
+
+### Submodules (auto-cloned)
+
+- **phoenix-discovery** — LAN service discovery
+- **phoenix-dsp** — DSP primitives (lowpass, DC block, AM demod)
+- **phoenix-kiss-fft** — FFT processing
 
 ### Windows Build
 
@@ -176,12 +180,18 @@ typedef struct {
 
 | File | Description |
 |------|-------------|
-| `src/waterfall.c` | Main application, SDL rendering |
-| `src/waterfall_dsp.c` | DSP utilities (lowpass, DC removal) |
-| `src/waterfall_audio.c` | Audio output |
+| `src/waterfall.c` | Main application, SDL rendering, TCP client |
+| `src/waterfall_audio.c` | Audio output (operator monitoring) |
 | `src/ui_core.c` | GUI framework |
 | `src/ui_widgets.c` | Widget implementations |
-| `src/kiss_fft.c` | FFT processing |
+
+### Submodules (external/)
+
+| Submodule | Description |
+|-----------|-------------|
+| `phoenix-discovery` | LAN service discovery |
+| `phoenix-dsp` | Shared DSP primitives (lowpass, DC block, AM demod) |
+| `phoenix-kiss-fft` | FFT processing |
 
 ---
 

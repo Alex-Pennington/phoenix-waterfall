@@ -35,11 +35,16 @@ signal_relay (TCP:4411)
 | File | Purpose |
 |------|---------|
 | `src/waterfall.c` | Main application, SDL rendering, TCP client |
-| `src/waterfall_dsp.c` | DSP utilities (lowpass, DC removal) |
 | `src/waterfall_audio.c` | Audio output for operator monitoring |
 | `src/ui_core.c` | GUI framework |
 | `src/ui_widgets.c` | Input, slider, button widgets |
-| `src/kiss_fft.c` | FFT processing |
+
+### Submodules (external/)
+| Submodule | Purpose |
+|-----------|---------|
+| `phoenix-discovery` | LAN service discovery |
+| `phoenix-dsp` | DSP primitives (lowpass, DC block, AM demod) |
+| `phoenix-kiss-fft` | FFT processing |
 
 ---
 
@@ -50,7 +55,7 @@ cd build/msys2-ucrt64
 cmake --build .
 ```
 
-**Dependencies:** SDL2, SDL2_ttf, kiss_fft (included), phoenix-discovery (submodule)
+**Dependencies:** SDL2, SDL2_ttf, submodules (phoenix-discovery, phoenix-dsp, phoenix-kiss-fft)
 
 ---
 
@@ -84,11 +89,17 @@ pn_listen(on_service_discovered, NULL);
 ```
 Auto-connects to `signal_splitter` when discovered.
 
-### P3 - DSP Filter Pattern
+### P3 - DSP Filter Pattern (from phoenix-dsp submodule)
 ```c
-wf_lowpass_t lp;
-wf_lowpass_init(&lp, cutoff_hz, sample_rate);
-float out = wf_lowpass_process(&lp, input);
+#include "pn_dsp.h"
+
+pn_lowpass_t lp;
+pn_lowpass_init(&lp, cutoff_hz, sample_rate);
+float out = pn_lowpass_process(&lp, input);
+
+pn_am_demod_t demod;
+pn_am_demod_init(&demod, audio_cutoff_hz, sample_rate);
+float audio = pn_am_demod_process(&demod, i, q);
 ```
 
 ### P4 - Display Parameters
@@ -133,6 +144,7 @@ gain=0.0
 |---------|---------|
 | SDL2 | Graphics and window |
 | SDL2_ttf | Text rendering |
-| kiss_fft | FFT processing (included) |
 | phoenix-discovery | LAN service discovery (submodule) |
+| phoenix-dsp | DSP primitives (submodule) |
+| phoenix-kiss-fft | FFT processing (submodule) |
 | Winsock2 | TCP networking (Windows) |
