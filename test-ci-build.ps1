@@ -1,4 +1,4 @@
-# test-ci-build.ps1 - Simulate GitHub Actions build locally
+# test-ci-build.ps1 - Test build locally
 # Run from PowerShell: .\test-ci-build.ps1
 
 $ErrorActionPreference = "Stop"
