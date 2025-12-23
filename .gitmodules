@@ -1,3 +1,9 @@
 [submodule "external/phoenix-discovery"]
 	path = external/phoenix-discovery
 	url = https://github.com/Alex-Pennington/phoenix-discovery.git
+[submodule "external/phoenix-dsp"]
+	path = external/phoenix-dsp
+	url = https://github.com/Alex-Pennington/phoenix-dsp.git
+[submodule "external/phoenix-kiss-fft"]
+	path = external/phoenix-kiss-fft
+	url = https://github.com/Alex-Pennington/phoenix-kiss-fft.git

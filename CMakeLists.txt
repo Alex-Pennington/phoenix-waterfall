@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(phoenix-waterfall
-    VERSION 0.1.0
+    VERSION 0.2.0
     DESCRIPTION "Phoenix SDR Waterfall Display"
     LANGUAGES C
 )
@@ -50,15 +50,31 @@ else()
 endif()
 
 #============================================================================
-# Phoenix Discovery (submodule)
+# Phoenix Submodules
 #============================================================================
 
+# Phoenix Discovery
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/phoenix-discovery/CMakeLists.txt")
     add_subdirectory(external/phoenix-discovery)
-    set(DISCOVERY_FOUND TRUE)
     message(STATUS "Using phoenix-discovery from external/")
 else()
     message(FATAL_ERROR "phoenix-discovery not found - run: git submodule update --init")
+endif()
+
+# Phoenix DSP
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/phoenix-dsp/CMakeLists.txt")
+    add_subdirectory(external/phoenix-dsp)
+    message(STATUS "Using phoenix-dsp from external/")
+else()
+    message(FATAL_ERROR "phoenix-dsp not found - run: git submodule update --init")
+endif()
+
+# Phoenix KISS FFT
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/phoenix-kiss-fft/CMakeLists.txt")
+    add_subdirectory(external/phoenix-kiss-fft)
+    message(STATUS "Using phoenix-kiss-fft from external/")
+else()
+    message(FATAL_ERROR "phoenix-kiss-fft not found - run: git submodule update --init")
 endif()
 
 #============================================================================
@@ -67,7 +83,7 @@ endif()
 
 set(WATERFALL_SOURCES
     src/waterfall.c
-    src/kiss_fft.c
+    src/waterfall_audio.c
 )
 
 if(SDL2_TTF_FOUND)
@@ -89,7 +105,6 @@ endif()
 
 target_include_directories(waterfall PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/external/phoenix-discovery/include
     ${SDL2_INCLUDE_DIRS}
 )
 
@@ -102,7 +117,16 @@ if(SDL2_TTF_FOUND)
     target_link_directories(waterfall PRIVATE ${SDL2_TTF_LIBRARY_DIR})
 endif()
 
-target_link_libraries(waterfall PRIVATE mingw32 SDL2main SDL2 pn_discovery)
+# Link all libraries
+target_link_libraries(waterfall PRIVATE 
+    mingw32 
+    SDL2main 
+    SDL2 
+    pn_discovery 
+    pn_dsp 
+    pn_kiss_fft
+)
+
 if(SDL2_TTF_FOUND)
     target_link_libraries(waterfall PRIVATE SDL2_ttf)
 endif()
