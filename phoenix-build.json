@@ -1,0 +1,15 @@
+{
+    "githubRepo":  "Alex-Pennington/phoenix-waterfall",
+    "projectName":  "phoenix-waterfall",
+    "packageFiles":  [
+                         "README.md",
+                         "LICENSE"
+                     ],
+    "dlls":  [
+                 "SDL2.dll",
+                 "SDL2_ttf.dll"
+             ],
+    "executables":  [
+                        "waterfall.exe"
+                    ]
+}

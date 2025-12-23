@@ -8,6 +8,9 @@ project(phoenix-waterfall
     LANGUAGES C
 )
 
+# Phoenix Build System integration
+include(external/phoenix-build-scripts/cmake/phoenix-build.cmake)
+
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
