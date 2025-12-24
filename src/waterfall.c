@@ -135,7 +135,7 @@ typedef struct {
 
 #define DISPLAY_SAMPLE_RATE     12000
 #define DISPLAY_FFT_SIZE        2048
-#define DISPLAY_OVERLAP         1024
+#define DISPLAY_OVERLAP         256   /* Update every 256 samples (~21ms at 12kHz) for smooth scrolling */
 #define DISPLAY_HZ_PER_BIN      ((float)DISPLAY_SAMPLE_RATE / DISPLAY_FFT_SIZE)
 #define ZOOM_MAX_HZ             5000.0f
 
