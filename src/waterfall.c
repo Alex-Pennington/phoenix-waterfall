@@ -580,9 +580,7 @@ static void draw_status_indicator(void) {
     int y = 5;
 
     uint8_t r, g, b;
-    if (g_test_pattern) {
-        r = 255; g = 255; b = 0;
-    } else if (g_connected) {
+    if (g_connected) {
         r = 0; g = 255; b = 0;
     } else {
         r = 255; g = 0; b = 0;
@@ -659,8 +657,6 @@ int main(int argc, char *argv[]) {
             strncpy(g_relay_host, argv[++i], sizeof(g_relay_host)-1);
         } else if (strcmp(argv[i], "--port") == 0 && i+1 < argc) {
             g_relay_port = atoi(argv[++i]);
-        } else if (strcmp(argv[i], "--test-pattern") == 0) {
-            g_test_pattern = true;
         } else if (strcmp(argv[i], "--node-id") == 0 && i+1 < argc) {
             strncpy(g_node_id, argv[++i], sizeof(g_node_id)-1);
         } else if (strcmp(argv[i], "--no-discovery") == 0) {
@@ -895,10 +891,6 @@ int main(int argc, char *argv[]) {
 #ifdef HAS_GUI
                             g_slider_gain.value = (int)g_gain_offset;
 #endif
-                            break;
-                        case SDLK_ESCAPE:
-                        case SDLK_q:
-                            running = false;
                             break;
                     }
                     break;
