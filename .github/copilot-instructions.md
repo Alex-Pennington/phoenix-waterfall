@@ -7,8 +7,10 @@
 - Verify before modifying: run `git status` and read the relevant files.
 
 ## Big Picture
-- Display-only SDL2 app that visualizes 12 kHz float32 I/Q from `signal_relay` (TCP:4411).
-- Waterfall path: I/Q buffer → FFT (phoenix-kiss-fft) → color-mapped spectrum.
+- Display-only SDL2 app that visualizes raw I/Q from `sdr_server`.
+- Auto-discovers sdr_server via phoenix-discovery, auto-connects with zero configuration.
+- Auto-reconnects on disconnect (5 second retry interval).
+- Waterfall path: I/Q buffer → Decimation (2 MHz → 12 kHz) → FFT (phoenix-kiss-fft) → color-mapped spectrum.
 - Audio path: optional monitor via `src/waterfall_audio.c`; detection/decoding lives elsewhere.
 
 ## Key Files
@@ -18,7 +20,7 @@
 - `waterfall.ini`: persisted settings (host/port/size/gain).
 
 ## Submodules (external/)
-- `phoenix-discovery`: UDP LAN discovery; auto-connect to `signal_splitter`.
+- `phoenix-discovery`: UDP LAN discovery; auto-find and auto-connect to `sdr_server`.
 - `phoenix-dsp`: primitives (lowpass, DC block, AM demod).
 - `phoenix-kiss-fft`: FFT implementation used by the display.
 
@@ -35,13 +37,18 @@
 - MSYS2 UCRT64 with CMake 3.16+ and Ninja; GitHub CLI (`gh`) configured for release uploads.
 
 ## Runtime & Controls
-- Keys: Tab (settings), +/- (gain), R (reconnect), T (test tone), Q/ESC (quit).
-- Manual connect: `--host` and `--port` CLI; discovery can be disabled via flags.
-- Typical params: `DISPLAY_FFT_SIZE=2048`, overlap=1024, ~5.86 Hz/bin at 12 kHz.
+- Auto-connects to sdr_server via discovery (zero configuration).
+- Auto-reconnects on disconnect every 5 seconds.
+- Keys: +/- (gain), Tab (settings), Q/ESC (quit).
+- Discovery can be disabled via `--no-discovery` flag; manual host/port via `--host`/`--port` CLI.
 
-## Protocol (relay)
-- Header `FT32`: `magic=0x46543332`, `sample_rate=12000`.
-- Frames `DATA`: `magic=0x44415441`, `sequence`, `num_samples`, followed by float32 I/Q pairs.
+## Protocol (sdr_server)
+- PHXI/IQDQ streaming protocol from sdr_server data_port (discovered via phoenix-discovery).
+- PHXI header (32 bytes): sample_rate, sample_format (S16/F32/U8), center_freq, gain, LNA state.
+- IQDQ data frames (16-byte header + samples): sequence number, sample count, I/Q data.
+- META frames (32 bytes): runtime parameter updates (frequency, gain, LNA).
+- Sample format conversion via phoenix-dsp: pn_s16_to_float(), pn_u8_to_float().
+- Decimation via phoenix-dsp: pn_decimate_t with anti-aliasing (2 MSPS → 12 kHz display rate).
 
 ## Patterns to Follow
 - Discovery: `pn_announce(..."waterfall"...)` and `pn_listen(on_service_discovered, ...)`.

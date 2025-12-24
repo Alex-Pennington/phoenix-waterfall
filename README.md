@@ -8,7 +8,7 @@
 
 ## Overview
 
-Real-time SDR waterfall display for the Phoenix SDR suite. Receives 12kHz float32 I/Q samples from signal_relay and provides visual spectrum analysis for operator signal verification.
+Real-time SDR waterfall display for the Phoenix SDR suite. Auto-discovers and connects to sdr_server via phoenix-discovery for raw I/Q stream visualization.
 
 This is the **display chain only** — detection logic (WWV tick detection, BCD decoding, etc.) lives in a separate module.
 
@@ -17,9 +17,8 @@ This is the **display chain only** — detection logic (WWV tick detection, BCD 
 ## Features
 
 - **SDL2 Waterfall Display** — Real-time spectrum visualization
+- **Auto-Discovery** — Finds and connects to sdr_server automatically via UDP discovery
 - **Auto-Gain** — Adaptive color mapping
-- **Service Discovery** — Auto-connects to signal_splitter via UDP discovery
-- **Settings Panel** — Runtime configuration (Tab key)
 - **Test Pattern** — 1000 Hz tone for testing without network
 - **Resizable Window** — Configuration persists to INI file
 
@@ -32,18 +31,18 @@ This is the **display chain only** — detection logic (WWV tick detection, BCD 
 │                        phoenix-waterfall                             │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                     │
-│   signal_relay (TCP:4411)                                           │
+│   sdr_server (raw I/Q)                                              │
 │        │                                                            │
-│        │  12kHz float32 I/Q                                         │
+│        │  Raw I/Q stream                                            │
 │        ▼                                                            │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐             │
 │  │   I/Q       │───►│     FFT     │───►│  Waterfall  │             │
-│  │   Buffer    │    │  Processing │    │   Display   │             │
+│  │   Buffer    │    │ (kiss-fft)  │    │   Display   │             │
 │  └─────────────┘    └─────────────┘    └─────────────┘             │
 │                                                                     │
 │   phoenix-discovery                                                 │
 │        │                                                            │
-│        └── Auto-connect to signal_splitter                          │
+│        └── Auto-connect to sdr_server                               │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -93,10 +92,10 @@ cmake --build . --clean-first
 ### Auto-Discovery Mode
 
 ```powershell
-# Start signal_splitter (broadcasts discovery)
-signal_splitter.exe
+# Start sdr_server (broadcasts discovery)
+sdr_server.exe
 
-# Start waterfall (auto-connects)
+# Start waterfall (auto-discovers and connects)
 waterfall.exe
 ```
 

@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(phoenix-waterfall
-    VERSION 0.3.3
+    VERSION 0.3.4
     DESCRIPTION "Phoenix SDR Waterfall Display"
     LANGUAGES C
 )

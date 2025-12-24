@@ -1,29 +1,33 @@
 /**
  * @file waterfall.c
- * @brief Waterfall display for signal_relay display stream
+ * @brief Waterfall display for sdr_server I/Q stream
  *
  * DISPLAY CHAIN ONLY - No detection logic here.
  * Detection (tick, marker, BCD) lives in phoenix-detector module.
  *
- * Connects to sdr_server for raw I/Q stream.
- * Uses phoenix-dsp for filtering/demodulation, phoenix-kiss-fft for FFT.
+ * Connects to sdr_server via phoenix-discovery for raw I/Q stream.
+ * Uses phoenix-dsp for decimation/filtering, phoenix-kiss-fft for FFT.
  *
  * HOT PATH (per-frame with samples):
- *   1. Receive I/Q samples from TCP or test pattern
- *   2. Accumulate in circular buffer
- *   3. Apply window function and compute FFT
- *   4. Calculate magnitudes and map to screen pixels
- *   5. Auto-gain tracking (attack/decay)
- *   6. Scroll waterfall and draw new row
- *   7. Render to screen
+ *   1. Receive IQDQ frames from sdr_server (PHXI/IQDQ protocol)
+ *   2. Convert samples to float32 (S16/F32/U8 formats supported)
+ *   3. Decimate from 2 MHz to 12 kHz display rate
+ *   4. Accumulate in circular buffer
+ *   5. Apply window function and compute FFT
+ *   6. Calculate magnitudes and map to screen pixels
+ *   7. Auto-gain tracking (attack/decay)
+ *   8. Scroll waterfall and draw new row
+ *   9. Render to screen
  *
  * Features:
+ *   - Auto-discovery and auto-connect to sdr_server
+ *   - Auto-reconnect on disconnect (5 second retry)
+ *   - PHXI/IQDQ protocol with sequence tracking
+ *   - Sample format conversion (S16/F32/U8)
+ *   - Decimation (2 MSPS → 12 kHz)
  *   - Settings panel (Tab key)
- *   - Auto-connect with retry
- *   - Service discovery (auto-finds sdr_server)
  *   - Resizable window
- *   - Gain adjustment
- *   - Test pattern mode (1000 Hz tone)
+ *   - Gain adjustment (+/- keys)
  */
 
 #include <stdio.h>
@@ -38,6 +42,7 @@
 #include "kiss_fft.h"
 #include "version.h"
 #include "pn_discovery.h"
+#include "pn_dsp.h"
 
 #ifdef HAS_GUI
 #include "ui_core.h"
@@ -78,26 +83,46 @@ typedef enum {
 } recv_result_t;
 
 /*============================================================================
- * Signal Relay Protocol
+ * SDR Server Protocol (PHXI/IQDQ)
  *============================================================================*/
 
-#define MAGIC_FT32  0x46543332
-#define MAGIC_DATA  0x44415441
+#define MAGIC_PHXI  0x50485849  // "PHXI" - stream header magic
+#define MAGIC_IQDQ  0x49514451  // "IQDQ" - data frame magic
+#define MAGIC_META  0x4D455441  // "META" - metadata frame magic
+
+/* Sample format types */
+#define SAMPLE_FORMAT_S16  1  // int16_t (2 bytes per I or Q)
+#define SAMPLE_FORMAT_F32  2  // float (4 bytes per I or Q)
+#define SAMPLE_FORMAT_U8   3  // uint8_t (1 byte per I or Q)
 
 #pragma pack(push, 1)
 typedef struct {
-    uint32_t magic;
-    uint32_t sample_rate;
-    uint32_t reserved1;
-    uint32_t reserved2;
-} relay_stream_header_t;
+    uint32_t magic;           // MAGIC_PHXI (0x50485849)
+    uint32_t version;         // Protocol version (currently 1)
+    uint32_t sample_rate;     // Samples per second
+    uint32_t sample_format;   // 1=S16, 2=F32, 3=U8
+    uint32_t center_freq_lo;  // Center frequency (low 32 bits)
+    uint32_t center_freq_hi;  // Center frequency (high 32 bits)
+    int32_t  gain_reduction;  // Gain reduction in 0.1 dB (e.g., 250 = 25.0 dB)
+    uint32_t lna_state;       // LNA state (1=enabled, 0=disabled)
+} phxi_stream_header_t;  // 32 bytes total
 
 typedef struct {
-    uint32_t magic;
-    uint32_t sequence;
-    uint32_t num_samples;
-    uint32_t reserved;
-} relay_data_frame_t;
+    uint32_t magic;       // MAGIC_IQDQ (0x49514451)
+    uint32_t sequence;    // Sequence number (wraps at UINT32_MAX)
+    uint32_t num_samples; // Number of I/Q pairs in this frame
+    uint32_t flags;       // Reserved for future use
+} iqdq_data_frame_t;  // 16 bytes header + sample data
+
+typedef struct {
+    uint32_t magic;           // MAGIC_META (0x4D455441)
+    uint32_t sequence;        // Sequence number
+    uint32_t center_freq_lo;  // Updated center frequency (low 32 bits)
+    uint32_t center_freq_hi;  // Updated center frequency (high 32 bits)
+    int32_t  gain_reduction;  // Updated gain reduction
+    uint32_t lna_state;       // Updated LNA state
+    uint32_t reserved[2];     // Reserved for future use
+} meta_update_t;  // 32 bytes total
 #pragma pack(pop)
 
 /*============================================================================
@@ -105,7 +130,7 @@ typedef struct {
  *============================================================================*/
 
 #define DEFAULT_RELAY_HOST      "localhost"
-#define DEFAULT_RELAY_PORT      4411
+#define DEFAULT_RELAY_PORT      4536  /* sdr_server data port */
 #define CONFIG_FILE             "waterfall.ini"
 
 #define DISPLAY_SAMPLE_RATE     12000
@@ -143,9 +168,19 @@ static volatile bool g_service_discovered = false;
 static char g_discovered_ip[64] = {0};
 static int g_discovered_port = 0;
 
-/* Mode */
-static bool g_test_pattern = false;
-static uint64_t g_test_sample_count = 0;
+/* Protocol state */
+static uint32_t g_sample_format = SAMPLE_FORMAT_F32;
+static uint32_t g_last_sequence = 0;
+static uint8_t *g_raw_buffer = NULL;
+static int g_raw_buffer_size = 0;
+
+/* Decimation (2 MSPS → 12 kHz) */
+static pn_decimate_t g_decimator_i;
+static pn_decimate_t g_decimator_q;
+
+/* Auto-reconnect */
+#define RECONNECT_INTERVAL_MS 5000
+static uint32_t g_last_reconnect_time = 0;
 
 /* Window */
 static int g_window_width = DEFAULT_WINDOW_WIDTH;
@@ -184,7 +219,6 @@ static widget_input_t g_input_host;
 static widget_input_t g_input_port;
 static widget_slider_t g_slider_gain;
 static widget_button_t g_btn_connect;
-static widget_button_t g_btn_test;
 #endif
 
 /*============================================================================
@@ -316,6 +350,7 @@ static void disconnect_from_relay(void) {
         g_socket = SOCKET_INVALID;
     }
     g_connected = false;
+    g_last_reconnect_time = SDL_GetTicks();  /* Record disconnect time for retry */
 }
 
 static bool connect_to_relay(void) {
@@ -325,6 +360,7 @@ static bool connect_to_relay(void) {
     g_socket = tcp_connect(g_relay_host, g_relay_port);
     if (g_socket == SOCKET_INVALID) {
         printf("Connection failed\n");
+        g_last_reconnect_time = SDL_GetTicks();
         return false;
     }
 
@@ -336,23 +372,41 @@ static bool connect_to_relay(void) {
     setsockopt(g_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 #endif
 
-    relay_stream_header_t header;
+    /* Read PHXI stream header (32 bytes) */
+    phxi_stream_header_t header;
     if (tcp_recv_exact(g_socket, &header, sizeof(header)) != RECV_OK) {
         printf("Failed to receive header\n");
         socket_close(g_socket);
         g_socket = SOCKET_INVALID;
+        g_last_reconnect_time = SDL_GetTicks();
         return false;
     }
 
-    if (header.magic != MAGIC_FT32) {
-        printf("Invalid header magic: 0x%08X\n", header.magic);
+    if (header.magic != MAGIC_PHXI) {
+        printf("Invalid header magic: 0x%08X (expected PHXI 0x%08X)\n", header.magic, MAGIC_PHXI);
         socket_close(g_socket);
         g_socket = SOCKET_INVALID;
+        g_last_reconnect_time = SDL_GetTicks();
         return false;
     }
 
+    /* Extract stream parameters */
     g_sample_rate = header.sample_rate;
-    printf("Connected: %u Hz float32 I/Q stream\n", g_sample_rate);
+    g_sample_format = header.sample_format;
+    g_last_sequence = 0;  /* Reset sequence tracking */
+
+    const char *format_str = (g_sample_format == SAMPLE_FORMAT_S16) ? "S16" :
+                            (g_sample_format == SAMPLE_FORMAT_F32) ? "F32" :
+                            (g_sample_format == SAMPLE_FORMAT_U8) ? "U8" : "Unknown";
+    printf("Connected: %u Hz %s I/Q stream\n", g_sample_rate, format_str);
+
+    /* Initialize decimation (e.g., 2 MHz → 12 kHz = factor ~167) */
+    int decimation_factor = g_sample_rate / DISPLAY_SAMPLE_RATE;
+    if (decimation_factor < 1) decimation_factor = 1;
+    printf("Decimation: %d:1 (%u Hz → %u Hz)\n", decimation_factor, g_sample_rate, DISPLAY_SAMPLE_RATE);
+    
+    pn_decimate_init(&g_decimator_i, decimation_factor, (float)g_sample_rate);
+    pn_decimate_init(&g_decimator_q, decimation_factor, (float)g_sample_rate);
 
 #ifdef _WIN32
     timeout = 100;
@@ -440,7 +494,6 @@ static void init_settings_panel(void) {
     y += 45;
 
     widget_button_init(&g_btn_connect, x, y, 100, 28, "Connect");
-    widget_button_init(&g_btn_test, x + 115, y, 105, 28, "Test Mode");
 }
 
 static void update_settings_panel(mouse_state_t *mouse, SDL_Event *event) {
@@ -462,22 +515,13 @@ static void update_settings_panel(mouse_state_t *mouse, SDL_Event *event) {
         if (g_connected) {
             disconnect_from_relay();
         } else {
-            g_test_pattern = false;
             connect_to_relay();
         }
         save_config();
     }
 
-    if (widget_button_update(&g_btn_test, mouse)) {
-        g_test_pattern = !g_test_pattern;
-        if (g_test_pattern) {
-            disconnect_from_relay();
-        }
-    }
-
     /* Update button labels */
     g_btn_connect.label = g_connected ? "Disconnect" : "Connect";
-    g_btn_test.label = g_test_pattern ? "Stop Test" : "Test Mode";
 }
 
 static void draw_settings_panel(void) {
@@ -497,10 +541,7 @@ static void draw_settings_panel(void) {
     /* Status indicator */
     const char *status;
     uint32_t status_color;
-    if (g_test_pattern) {
-        status = "TEST MODE";
-        status_color = COLOR_YELLOW;
-    } else if (g_connected) {
+    if (g_connected) {
         status = "CONNECTED";
         status_color = COLOR_GREEN;
     } else {
@@ -514,7 +555,6 @@ static void draw_settings_panel(void) {
     widget_input_draw(&g_input_port, g_ui);
     widget_slider_draw(&g_slider_gain, g_ui);
     widget_button_draw(&g_btn_connect, g_ui);
-    widget_button_draw(&g_btn_test, g_ui);
 }
 
 static void reposition_settings_panel(void) {
@@ -527,7 +567,6 @@ static void reposition_settings_panel(void) {
     g_input_port.x = x; g_input_port.y = y; y += 50;
     g_slider_gain.x = x; g_slider_gain.y = y; y += 45;
     g_btn_connect.x = x; g_btn_connect.y = y;
-    g_btn_test.x = x + 115; g_btn_test.y = y;
 }
 #endif
 
@@ -606,8 +645,6 @@ static void print_usage(const char *prog) {
     printf("Runtime keys:\n");
     printf("  Tab        Toggle settings panel\n");
     printf("  +/-        Adjust gain\n");
-    printf("  R          Reconnect\n");
-    printf("  T          Toggle test pattern\n");
     printf("  Q/Esc      Quit\n\n");
     printf("Window is resizable. Settings saved to %s\n", CONFIG_FILE);
 }
@@ -639,7 +676,6 @@ int main(int argc, char *argv[]) {
     print_version("Phoenix SDR - Waterfall");
     printf("Window: %dx%d\n", g_window_width, g_window_height);
     printf("Relay: %s:%d\n", g_relay_host, g_relay_port);
-    if (g_test_pattern) printf("Starting in test mode\n");
 
     /* Initialize networking */
     if (!tcp_init()) {
@@ -739,7 +775,7 @@ int main(int argc, char *argv[]) {
 
     while (running) {
         /* Process discovered services (thread-safe from callback) */
-        if (g_service_discovered && !g_connected && !g_test_pattern) {
+        if (g_service_discovered && !g_connected) {
             g_service_discovered = false;  /* Clear flag */
             
             /* Update connection settings */
@@ -761,6 +797,19 @@ int main(int argc, char *argv[]) {
             } else {
                 printf("[DISCOVERY] Updated connection fields to %s:%d (auto-connect disabled)\n",
                        g_relay_host, g_relay_port);
+            }
+        }
+
+        /* Auto-reconnect timer (works with or without discovery) */
+        if (!g_connected) {
+            uint32_t now = SDL_GetTicks();
+            if (now - g_last_reconnect_time >= RECONNECT_INTERVAL_MS) {
+                /* Attempt reconnection (discovery provides target, or use configured host/port) */
+                if (g_discovery_enabled || strlen(g_relay_host) > 0) {
+                    printf("[AUTO-RECONNECT] Attempting connection to %s:%d...\n", 
+                           g_relay_host, g_relay_port);
+                    connect_to_relay();
+                }
             }
         }
         
@@ -847,18 +896,9 @@ int main(int argc, char *argv[]) {
                             g_slider_gain.value = (int)g_gain_offset;
 #endif
                             break;
-                        case SDLK_r:
-                            if (!g_show_settings) {
-                                disconnect_from_relay();
-                                g_test_pattern = false;
-                                connect_to_relay();
-                            }
-                            break;
-                        case SDLK_t:
-                            if (!g_show_settings) {
-                                g_test_pattern = !g_test_pattern;
-                                if (g_test_pattern) disconnect_from_relay();
-                            }
+                        case SDLK_ESCAPE:
+                        case SDLK_q:
+                            running = false;
                             break;
                     }
                     break;
@@ -876,23 +916,10 @@ int main(int argc, char *argv[]) {
         bool got_samples = false;
 
         /*====================================================================
-         * HOT PATH - Sample Acquisition (Test Pattern)
+         * HOT PATH - Sample Acquisition (TCP from sdr_server PHXI/IQDQ)
          *====================================================================*/
-        if (g_test_pattern) {
-            for (int i = 0; i < DISPLAY_OVERLAP; i++) {
-                double phase = 2.0 * 3.14159265 * 1000.0 * g_test_sample_count / g_sample_rate;
-                g_iq_buffer[g_iq_buffer_idx].i = (float)cos(phase) * 0.5f;
-                g_iq_buffer[g_iq_buffer_idx].q = (float)sin(phase) * 0.5f;
-                g_iq_buffer_idx = (g_iq_buffer_idx + 1) % DISPLAY_FFT_SIZE;
-                g_test_sample_count++;
-                g_new_samples++;
-            }
-            got_samples = (g_new_samples >= DISPLAY_OVERLAP);
-        /*====================================================================
-         * HOT PATH - Sample Acquisition (TCP from signal_relay)
-         *====================================================================*/
-        } else if (g_connected) {
-            relay_data_frame_t frame;
+        if (g_connected) {
+            iqdq_data_frame_t frame;
             recv_result_t result = tcp_recv_exact(g_socket, &frame, sizeof(frame));
 
             if (result == RECV_TIMEOUT) {
@@ -900,28 +927,90 @@ int main(int argc, char *argv[]) {
             } else if (result == RECV_ERROR) {
                 printf("Connection lost\n");
                 disconnect_from_relay();
-            } else if (frame.magic == MAGIC_DATA) {
-                int data_bytes = frame.num_samples * 2 * sizeof(float);
-                if (data_bytes > sample_buffer_size) {
-                    sample_buffer = (float*)realloc(sample_buffer, data_bytes);
-                    sample_buffer_size = data_bytes;
+            } else if (frame.magic == MAGIC_IQDQ) {
+                /* Check sequence for dropped frames */
+                if (g_last_sequence != 0 && frame.sequence != g_last_sequence + 1) {
+                    uint32_t dropped = frame.sequence - g_last_sequence - 1;
+                    printf("WARNING: Dropped %u frame(s) (seq %u → %u)\n", 
+                           dropped, g_last_sequence, frame.sequence);
+                }
+                g_last_sequence = frame.sequence;
+
+                /* Calculate bytes per sample based on format */
+                int bytes_per_sample = (g_sample_format == SAMPLE_FORMAT_S16) ? 2 :
+                                      (g_sample_format == SAMPLE_FORMAT_F32) ? 4 : 1;
+                int data_bytes = frame.num_samples * 2 * bytes_per_sample;  /* I+Q pairs */
+
+                /* Allocate raw buffer for network data */
+                if (data_bytes > g_raw_buffer_size) {
+                    g_raw_buffer = (uint8_t*)realloc(g_raw_buffer, data_bytes);
+                    g_raw_buffer_size = data_bytes;
                 }
 
-                /* HOT PATH - I/Q Buffer Accumulation */
-                if (tcp_recv_exact(g_socket, sample_buffer, data_bytes) == RECV_OK) {
+                /* Allocate sample buffer for float conversion */
+                int float_bytes = frame.num_samples * 2 * sizeof(float);
+                if (float_bytes > sample_buffer_size) {
+                    sample_buffer = (float*)realloc(sample_buffer, float_bytes);
+                    sample_buffer_size = float_bytes;
+                }
+
+                /* HOT PATH - Read samples and convert to float */
+                if (tcp_recv_exact(g_socket, g_raw_buffer, data_bytes) == RECV_OK) {
+                    /* Convert samples to float32 based on format */
+                    if (g_sample_format == SAMPLE_FORMAT_S16) {
+                        pn_s16_to_float((int16_t*)g_raw_buffer, sample_buffer, frame.num_samples);
+                    } else if (g_sample_format == SAMPLE_FORMAT_U8) {
+                        pn_u8_to_float(g_raw_buffer, sample_buffer, frame.num_samples);
+                    } else {  /* SAMPLE_FORMAT_F32 */
+                        memcpy(sample_buffer, g_raw_buffer, float_bytes);
+                    }
+
+                    /* HOT PATH - Decimate and accumulate to FFT buffer */
                     for (uint32_t s = 0; s < frame.num_samples; s++) {
-                        g_iq_buffer[g_iq_buffer_idx].i = sample_buffer[s * 2];
-                        g_iq_buffer[g_iq_buffer_idx].q = sample_buffer[s * 2 + 1];
-                        g_iq_buffer_idx = (g_iq_buffer_idx + 1) % DISPLAY_FFT_SIZE;
-                        g_new_samples++;
+                        float i_sample = sample_buffer[s * 2];
+                        float q_sample = sample_buffer[s * 2 + 1];
+                        
+                        float decimated_i, decimated_q;
+                        bool i_ready = pn_decimate_process(&g_decimator_i, i_sample, &decimated_i);
+                        bool q_ready = pn_decimate_process(&g_decimator_q, q_sample, &decimated_q);
+                        
+                        /* Both channels should decimate in sync */
+                        if (i_ready && q_ready) {
+                            g_iq_buffer[g_iq_buffer_idx].i = decimated_i;
+                            g_iq_buffer[g_iq_buffer_idx].q = decimated_q;
+                            g_iq_buffer_idx = (g_iq_buffer_idx + 1) % DISPLAY_FFT_SIZE;
+                            g_new_samples++;
+                        }
                     }
                     got_samples = (g_new_samples >= DISPLAY_OVERLAP);
                 } else {
                     disconnect_from_relay();
                 }
+            } else if (frame.magic == MAGIC_META) {
+                /* META frame - read remaining bytes (32 - 16 = 16 bytes) */
+                meta_update_t meta;
+                memcpy(&meta, &frame, sizeof(frame));  /* Copy header we already read */
+                if (tcp_recv_exact(g_socket, ((uint8_t*)&meta) + sizeof(frame), 
+                                  sizeof(meta) - sizeof(frame)) == RECV_OK) {
+                    printf("META update: seq=%u\n", meta.sequence);
+                    
+                    /* Check if parameters changed requiring reconnection */
+                    uint64_t new_freq = ((uint64_t)meta.center_freq_hi << 32) | meta.center_freq_lo;
+                    (void)new_freq;  /* Unused for now, but logged */
+                    
+                    /* If sample format or rate changes, trigger complete reinit */
+                    printf("  Center freq: %llu Hz, Gain: %.1f dB, LNA: %u\n",
+                           (unsigned long long)new_freq, 
+                           meta.gain_reduction / 10.0f, 
+                           meta.lna_state);
+                    /* Note: sdr_server doesn't currently send format/rate changes in META,
+                     * but if it did, we'd disconnect and reconnect here */
+                }
+            } else {
+                printf("Unknown frame magic: 0x%08X\n", frame.magic);
             }
         } else {
-            /* Not connected - user must click Connect in settings */
+            /* Not connected - auto-reconnect handled below */
         }
 
         /* Skip if no data AND settings panel not open */
